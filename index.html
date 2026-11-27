@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#111418">
+<title>School Zone</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<style>
+  :root {
+    --bg: #111418; --fg: #f4f6f8; --muted: #9aa4ae; --panel: rgba(0,0,0,.28);
+    --clear: #1e8f4e; --warn: #f2b400; --zone: #c8201e; --nofix: #3a4148;
+    --sign-ring: #d0231f; --sign-bg: #fff; --sign-fg: #111;
+    --dim: 1;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font: 16px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-tap-highlight-color: transparent; }
+  body { display: flex; flex-direction: column; min-height: 100dvh; padding: env(safe-area-inset-top) 16px env(safe-area-inset-bottom); }
+  button { font: inherit; color: inherit; background: var(--panel); border: 1px solid rgba(255,255,255,.25);
+    border-radius: 12px; padding: 12px 16px; min-height: 48px; cursor: pointer; }
+  button.primary { background: #fff; color: #111; border: 0; font-weight: 700; font-size: 1.15rem; }
+  button[aria-pressed="true"] { background: rgba(255,255,255,.85); color: #111; }
+
+  #state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px;
+    margin: 12px -16px; padding: 16px; text-align: center; background: var(--nofix); filter: brightness(var(--dim));
+    transition: background-color .25s; }
+  #state[data-s="1"] { background: var(--clear); }
+  #state[data-s="2"] { background: var(--warn); color: #111; animation: flash 1s steps(1) infinite; }
+  #state[data-s="3"] { background: var(--zone); }
+  #state[data-s="4"] { background: var(--zone); animation: flash .5s steps(1) infinite; }
+  @keyframes flash { 50% { background: #000; color: var(--fg); } }
+  @media (prefers-reduced-motion: reduce) { #state[data-s="2"], #state[data-s="4"] { animation: none; } }
+
+  #headline { font-size: clamp(2rem, 11vw, 4rem); font-weight: 800; letter-spacing: .01em; line-height: 1.05; }
+  #sub { font-size: clamp(1.1rem, 5vw, 1.6rem); font-weight: 600; min-height: 1.4em; }
+  .row { display: flex; gap: 28px; align-items: center; justify-content: center; flex-wrap: wrap; }
+  .sign { width: clamp(110px, 34vw, 170px); aspect-ratio: 1; border-radius: 50%; background: var(--sign-bg); color: var(--sign-fg);
+    border: clamp(10px, 3.4vw, 17px) solid var(--sign-ring); display: grid; place-items: center;
+    font-size: clamp(2.6rem, 13vw, 4.4rem); font-weight: 800; font-variant-numeric: tabular-nums; }
+  .sign[hidden] { display: none; }
+  .speed { font-variant-numeric: tabular-nums; }
+  .speed b { display: block; font-size: clamp(3rem, 16vw, 5.5rem); line-height: 1; }
+  .speed span { font-size: .95rem; opacity: .85; }
+
+  #bar { display: flex; gap: 8px; flex-wrap: wrap; }
+  #bar button { flex: 1 1 auto; }
+  #info { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 4px 12px; padding: 10px 0 6px;
+    color: var(--muted); font-size: .9rem; }
+  #info b { color: var(--fg); font-weight: 600; }
+  .dot { display: inline-block; width: .6em; height: .6em; border-radius: 50%; background: #777; margin-right: .35em; vertical-align: .05em; }
+  .ok { background: #3ccf73; } .bad { background: #e5484d; } .wait { background: #f2b400; }
+  #msg { color: #ffd166; font-size: .95rem; min-height: 1.3em; padding-top: 4px; }
+  #start { display: flex; flex-direction: column; gap: 12px; padding: 18px 0; }
+  #start p { margin: 0; color: var(--muted); }
+  #start[hidden] { display: none; }
+</style>
+</head>
+<body>
+  <section id="state" data-s="0" aria-live="assertive">
+    <div id="headline">Not connected</div>
+    <div class="row">
+      <div class="sign" id="sign" hidden aria-label="Speed limit">40</div>
+      <div class="speed"><b id="speed">–</b><span>km/h</span></div>
+    </div>
+    <div id="sub">Tap Connect to start</div>
+  </section>
+
+  <div id="start">
+    <button class="primary" id="connect">Connect to School Zone device</button>
+    <p>Keep this page open on screen while driving. Alerts are spoken, and play through the car speakers when the phone is connected to the car.</p>
+  </div>
+
+  <div id="bar">
+    <button id="mute" aria-pressed="false">Voice on</button>
+    <button id="dim" aria-pressed="false">Dim</button>
+    <button id="test">Test voice</button>
+  </div>
+  <div id="info">
+    <div><span class="dot" id="btDot"></span>Device: <b id="btText">not connected</b></div>
+    <div><span class="dot" id="gpsDot"></span>Phone GPS: <b id="gpsText">off</b></div>
+    <div>Device clock: <b id="clockText">–</b></div>
+    <div>Last update: <b id="ageText">–</b></div>
+  </div>
+  <div id="msg" role="status"></div>
+
+<script>
+"use strict";
+// ---- protocol (must match school_zone/phone_gps.h)
+const SVC = "5c3a0001-8f1e-4b6e-9a51-2c7d3e1f0a01";
+const FIX_UUID = "5c3a0002-8f1e-4b6e-9a51-2c7d3e1f0a01";
+const STATUS_UUID = "5c3a0003-8f1e-4b6e-9a51-2c7d3e1f0a01";
+const NAME_UUID = "5c3a0004-8f1e-4b6e-9a51-2c7d3e1f0a01";
+const NO_FIX = 0, IDLE = 1, APPROACH = 2, IN_ZONE = 3, OVERSPEED = 4;
+
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+
+// ---- state
+let device = null, fixChar = null, statusChar = null, nameChar = null;
+let connected = false, wantConnected = false, writing = false;
+let lastStatusMs = 0, nameSeq = -1, zoneName = "";
+let cur = { state: -1, limit: 0, dist: null, flags: 0 };
+let gpsWatch = null, lastPos = null, lastFixMs = 0, phoneKmh = null;
+let muted = store.get("sz_muted", false), dimmed = store.get("sz_dim", false);
+
+// ---- voice
+let voice = null;
+function pickVoice() {
+  const vs = speechSynthesis.getVoices();
+  voice = vs.find(v => /en[-_]AU/i.test(v.lang)) || vs.find(v => /^en/i.test(v.lang)) || null;
+}
+if ("speechSynthesis" in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
+function say(text, urgent = false) {
+  if (muted || !("speechSynthesis" in window)) return;
+  if (urgent) speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  if (voice) u.voice = voice;
+  u.rate = 1.05;
+  speechSynthesis.speak(u);
+}
+
+// ---- announcements on state changes
+let lastApproachSaid = 0, overspeedTimer = null, lostTimer = null, lostSaid = false;
+function announce(prev, s, limit) {
+  const now = Date.now();
+  if (s === APPROACH && prev !== APPROACH && prev !== IN_ZONE && prev !== OVERSPEED) {
+    if (now - lastApproachSaid > 20000) { say(`School zone ahead. ${limit}.`, true); lastApproachSaid = now; }
+  } else if ((s === IN_ZONE) && (prev === IDLE || prev === APPROACH || prev === NO_FIX)) {
+    say(`School zone. ${limit}.`, true);
+  } else if (s === IDLE && (prev === IN_ZONE || prev === OVERSPEED)) {
+    say("End of school zone.");
+  }
+  clearInterval(overspeedTimer); overspeedTimer = null;
+  if (s === OVERSPEED) {
+    say(`Slow down. ${limit}.`, true);
+    overspeedTimer = setInterval(() => say(`Slow down. ${limit}.`, true), 5000);
+  }
+}
+
+// ---- rendering
+const HEAD = { [-1]: "Not connected", [NO_FIX]: "Waiting for GPS", [IDLE]: "Clear",
+  [APPROACH]: "School zone ahead", [IN_ZONE]: "School zone", [OVERSPEED]: "Slow down" };
+function render() {
+  const s = connected ? cur.state : -1;
+  $("state").dataset.s = String(Math.max(0, s));
+  $("headline").textContent = HEAD[s] ?? "–";
+  const showSign = s === APPROACH || s === IN_ZONE || s === OVERSPEED;
+  $("sign").hidden = !showSign;
+  $("sign").textContent = cur.limit || "";
+  let sub = "";
+  if (!connected) sub = wantConnected ? "Reconnecting to device…" : "Tap Connect to start";
+  else if (s === APPROACH && cur.dist != null) sub = `${Math.max(0, cur.dist)} m · ${zoneName}`;
+  else if (showSign) sub = zoneName;
+  else if (s === NO_FIX) sub = lastFixMs ? "Phone GPS not accurate enough yet" : "Allow location and go outside";
+  $("sub").textContent = sub;
+  $("speed").textContent = phoneKmh == null ? "–" : Math.round(phoneKmh);
+  $("start").hidden = connected || wantConnected;
+}
+function setDot(id, cls) { $(id).className = "dot " + cls; }
+function msg(t) { $("msg").textContent = t || ""; }
+
+setInterval(() => {   // freshness indicators
+  const age = lastStatusMs ? (Date.now() - lastStatusMs) / 1000 : null;
+  $("ageText").textContent = age == null ? "–" : age < 2 ? "now" : `${Math.round(age)} s ago`;
+  if (connected && age != null && age > 4) msg("No updates from the device.");
+  const fixAge = lastFixMs ? (Date.now() - lastFixMs) / 1000 : null;
+  if (gpsWatch !== null) {
+    if (fixAge == null || fixAge > 5) { setDot("gpsDot", "wait"); $("gpsText").textContent = "searching…"; }
+    if (fixAge != null && fixAge > 10 && !lostSaid && connected) { say("GPS signal lost."); lostSaid = true; }
+  }
+}, 1000);
+
+// ---- Bluetooth
+async function connectFlow() {
+  if (!navigator.bluetooth) { msg("Bluetooth isn't available here. Use Chrome on Android, from an https:// address."); return; }
+  say(" ");  // unlock speech on this tap
+  try {
+    device = await navigator.bluetooth.requestDevice({ filters: [{ services: [SVC] }] });
+  } catch (e) { if (e.name !== "NotFoundError") msg("Bluetooth: " + e.message); return; }
+  device.addEventListener("gattserverdisconnected", onDisconnected);
+  wantConnected = true;
+  startGps();
+  requestWakeLock();
+  await connectGatt();
+}
+async function connectGatt() {
+  for (let attempt = 0; wantConnected && !connected; attempt++) {
+    try {
+      $("btText").textContent = "connecting…"; setDot("btDot", "wait"); render();
+      const server = await device.gatt.connect();
+      const svc = await server.getPrimaryService(SVC);
+      fixChar = await svc.getCharacteristic(FIX_UUID);
+      statusChar = await svc.getCharacteristic(STATUS_UUID);
+      nameChar = await svc.getCharacteristic(NAME_UUID);
+      statusChar.addEventListener("characteristicvaluechanged", (ev) => onStatus(ev.target.value));
+      await statusChar.startNotifications();
+      connected = true; nameSeq = -1; msg("");
+      $("btText").textContent = device.name || "connected"; setDot("btDot", "ok");
+      say("Device connected.");
+      if (lastPos) sendFix(lastPos);
+    } catch (e) {
+      $("btText").textContent = "retrying…"; setDot("btDot", "bad");
+      await new Promise(r => setTimeout(r, Math.min(10000, 1500 * (attempt + 1))));
+    }
+  }
+  render();
+}
+function onDisconnected() {
+  if (!connected) return;
+  connected = false; fixChar = statusChar = nameChar = null;
+  clearInterval(overspeedTimer); overspeedTimer = null;
+  setDot("btDot", "bad"); $("btText").textContent = "disconnected";
+  say("Device disconnected.", true);
+  cur.state = -1; render();
+  if (wantConnected) connectGatt();
+}
+async function onStatus(dv) {
+  if (dv.byteLength < 8 || dv.getUint8(0) !== 2) return;
+  lastStatusMs = Date.now();
+  const s = dv.getUint8(1), limit = dv.getUint8(2), dist = dv.getInt16(3, true), flags = dv.getUint8(5), seq = dv.getUint8(7);
+  if (seq !== nameSeq && nameChar) {
+    nameSeq = seq;
+    try { zoneName = new TextDecoder().decode(await nameChar.readValue()); } catch {}
+  }
+  const prev = cur.state;
+  cur = { state: s, limit, dist: dist === 0x7fff ? null : dist, flags };
+  $("clockText").textContent = flags & 1 ? (flags & 2 ? "school day" : "no school today") : "not set";
+  if (connected && s !== NO_FIX && !(flags & 4) && lastFixMs) msg("Device isn't using the phone's GPS (accuracy too low?).");
+  else if (Date.now() - lastStatusMs < 2000) msg("");
+  if (prev !== s && prev !== -1) announce(prev, s, limit);
+  render();
+}
+
+// ---- phone GPS -> device
+function startGps() {
+  if (gpsWatch !== null) return;
+  if (!navigator.geolocation) { msg("This browser has no location access."); return; }
+  gpsWatch = navigator.geolocation.watchPosition(onPos, (e) => {
+    setDot("gpsDot", "bad");
+    $("gpsText").textContent = e.code === 1 ? "permission denied" : "unavailable";
+    if (e.code === 1) msg("Allow location for this page: tap the lock icon in the address bar → Permissions.");
+  }, { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 });
+}
+function bearing(a, b) {
+  const k = Math.cos(a.lat * Math.PI / 180);
+  const dx = (b.lon - a.lon) * k, dy = b.lat - a.lat;
+  return ((Math.atan2(dx, dy) * 180 / Math.PI) + 360) % 360;
+}
+function metres(a, b) {
+  const k = Math.cos(a.lat * Math.PI / 180) * 111320;
+  return Math.hypot((b.lon - a.lon) * k, (b.lat - a.lat) * 111132);
+}
+let prevPos = null;
+function onPos(p) {
+  const c = p.coords;
+  const pos = { lat: c.latitude, lon: c.longitude, acc: c.accuracy, t: p.timestamp, speed: c.speed, heading: c.heading };
+  // Fill in speed / heading when the phone doesn't report them.
+  if (prevPos) {
+    const dt = (pos.t - prevPos.t) / 1000, d = metres(prevPos, pos);
+    if ((pos.speed == null || isNaN(pos.speed)) && dt > 0.5) pos.speed = d / dt;
+    if ((pos.heading == null || isNaN(pos.heading)) && d > 3) pos.heading = bearing(prevPos, pos);
+  }
+  prevPos = pos; lastPos = pos; lastFixMs = Date.now(); lostSaid = false;
+  phoneKmh = pos.speed == null || isNaN(pos.speed) ? null : pos.speed * 3.6;
+  setDot("gpsDot", pos.acc <= 12 ? "ok" : "wait");
+  $("gpsText").textContent = `±${Math.round(pos.acc)} m`;
+  sendFix(pos);
+  render();
+}
+async function sendFix(pos) {
+  if (!connected || !fixChar || writing) return;
+  const b = new DataView(new ArrayBuffer(20));
+  const ms = Math.floor(pos.t);
+  b.setUint8(0, 1);
+  b.setInt32(1, Math.round(pos.lat * 1e7), true);
+  b.setInt32(5, Math.round(pos.lon * 1e7), true);
+  b.setUint16(9, pos.speed == null || isNaN(pos.speed) ? 0xffff : Math.min(0xfffe, Math.round(pos.speed * 100)), true);
+  b.setUint16(11, pos.heading == null || isNaN(pos.heading) ? 0xffff : Math.round(((pos.heading % 360) + 360) % 360 * 100), true);
+  b.setUint16(13, Math.min(0xfffe, Math.round(pos.acc * 10)), true);
+  b.setUint32(15, Math.floor(ms / 1000), true);
+  b.setUint8(19, Math.floor((ms % 1000) / 10));
+  writing = true;
+  try { await fixChar.writeValueWithoutResponse(b.buffer); } catch (e) { /* link dropping; reconnect handles it */ }
+  finally { writing = false; }
+}
+
+// ---- screen on
+let wakeLock = null;
+async function requestWakeLock() {
+  try { if ("wakeLock" in navigator && document.visibilityState === "visible") wakeLock = await navigator.wakeLock.request("screen"); } catch {}
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && wantConnected) requestWakeLock();
+});
+
+// ---- buttons
+function applyPrefs() {
+  $("mute").setAttribute("aria-pressed", String(muted));
+  $("mute").textContent = muted ? "Voice off" : "Voice on";
+  $("dim").setAttribute("aria-pressed", String(dimmed));
+  document.documentElement.style.setProperty("--dim", dimmed ? "0.45" : "1");
+}
+$("connect").addEventListener("click", connectFlow);
+$("mute").addEventListener("click", () => { muted = !muted; store.set("sz_muted", muted); if (muted) speechSynthesis.cancel(); applyPrefs(); });
+$("dim").addEventListener("click", () => { dimmed = !dimmed; store.set("sz_dim", dimmed); applyPrefs(); });
+$("test").addEventListener("click", () => {
+  const was = muted; muted = false;
+  say("School zone ahead. 40."); say("School zone. 40."); say("Slow down. 40."); say("End of school zone.");
+  muted = was;
+});
+applyPrefs();
+render();
+// ?demo : preview the screens and voice without a device (cycles every 4 s; tap anywhere for sound).
+if (new URLSearchParams(location.search).has("demo")) {
+  const seq = [[IDLE, 0, null], [APPROACH, 40, 48], [APPROACH, 40, 22], [IN_ZONE, 40, -5], [OVERSPEED, 40, -40], [IN_ZONE, 40, -90], [IDLE, 0, null]];
+  let i = 0; connected = true; zoneName = "Demo Public School"; phoneKmh = 38; lastStatusMs = Date.now();
+  $("btText").textContent = "demo"; setDot("btDot", "ok");
+  const step = () => {
+    const [st, lim, d] = seq[i++ % seq.length], prev = cur.state;
+    cur = { state: st, limit: lim || cur.limit, dist: d, flags: 7 }; lastStatusMs = Date.now();
+    phoneKmh = st === OVERSPEED ? 52 : 38;
+    if (prev !== -1 && prev !== st) announce(prev, st, cur.limit);
+    render();
+  };
+  step(); setInterval(step, 4000);
+}
+if (!navigator.bluetooth) msg("Bluetooth isn't available here. Open this page in Chrome on Android, from an https:// address.");
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+</script>
+</body>
+</html>
