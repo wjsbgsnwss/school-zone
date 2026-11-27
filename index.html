@@ -52,6 +52,8 @@
   #timebar label { color: var(--muted); }
   #timebar input { flex: 1 1 180px; min-height: 48px; font: inherit; color: var(--fg); background: var(--panel);
     border: 1px solid rgba(255,255,255,.25); border-radius: 12px; padding: 8px 12px; color-scheme: dark; }
+  #street { font-size: clamp(1rem, 4.6vw, 1.35rem); opacity: .95; }
+  #street[hidden] { display: none; }
   #testBadge { background: #ffd166; color: #111; font-weight: 800; border-radius: 999px; padding: 6px 14px; font-size: 1rem; }
   #testBadge[hidden] { display: none; }
   #info { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 4px 12px; padding: 10px 0 6px;
@@ -73,6 +75,7 @@
       <div class="speed"><b id="speed">–</b><span>km/h</span></div>
     </div>
     <div id="sub">Tap Connect to start</div>
+    <div id="street" hidden>Street: <b id="streetText">N/A</b></div>
     <div id="testBadge" hidden>TEST TIME · <span id="testNow"></span></div>
   </section>
 
@@ -172,10 +175,12 @@ function render() {
   $("sign").textContent = cur.limit || "";
   let sub = "";
   if (!connected) sub = wantConnected ? "Reconnecting to device…" : "Tap Connect to start";
-  else if (s === APPROACH && cur.dist != null) sub = `${Math.max(0, cur.dist)} m · ${zoneName}`;
-  else if (showSign) sub = zoneName;
+  else if (s === APPROACH && cur.dist != null) sub = `${Math.max(0, cur.dist)} m ahead`;
   else if (s === NO_FIX) sub = lastFixMs ? "Phone GPS not accurate enough yet" : "Allow location and go outside";
   $("sub").textContent = sub;
+  // Street (online lookup); N/A when offline or not found.
+  $("street").hidden = !connected;
+  $("streetText").textContent = navigator.onLine && street ? street : "N/A";
   $("speed").textContent = phoneKmh == null ? "–" : Math.round(phoneKmh);
   $("start").hidden = connected || wantConnected;
 }
@@ -273,6 +278,25 @@ function metres(a, b) {
   return Math.hypot((b.lon - a.lon) * k, (b.lat - a.lat) * 111132);
 }
 let prevPos = null, lastRealMs = 0, lastSentMs = 0, sim = null;
+// Street name, when the phone is online (OpenStreetMap Nominatim reverse geocoding). At most one
+// lookup per 8 s and only after moving 40 m (their fair-use limit is 1 per second). Offline: the
+// last name is kept and nothing else changes.
+let street = "", lookupAt = null, lookupBusy = false, lastLookupMs = 0;
+async function maybeLookup(lat, lon) {
+  if (lookupBusy || !navigator.onLine || Date.now() - lastLookupMs < 8000) return;
+  if (lookupAt && metres(lookupAt, { lat, lon }) < 40) return;
+  lookupBusy = true; lastLookupMs = Date.now(); lookupAt = { lat, lon };
+  try {
+    const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=17&accept-language=en&lat=${lat.toFixed(6)}&lon=${lon.toFixed(6)}`;
+    const r = await fetch(url);
+    if (r.ok) {
+      const a = (await r.json()).address || {};
+      const road = a.road || a.pedestrian || a.residential || "";
+      const area = a.suburb || a.town || a.village || a.city || "";
+      street = [road, area].filter(Boolean).join(", ");
+    } else street = "";
+  } catch { street = ""; } finally { lookupBusy = false; render(); }
+}
 // Test time: when set, every fix sent (real GPS or simulation) carries this time, running on
 // from when it was set. Not saved: a reload always goes back to real time.
 let testOffsetMs = null;
@@ -302,6 +326,7 @@ function onPos(p) {
   setDot("gpsDot", pos.acc <= 12 ? "ok" : "wait");
   $("gpsText").textContent = `±${Math.round(pos.acc)} m`;
   sendFix(pos);
+  maybeLookup(pos.lat, pos.lon);
   render();
 }
 async function sendFix(pos, simTime) {
@@ -383,6 +408,7 @@ function startSim(kmh, btn) {
     const f = fixes[i];
     phoneKmh = kmh;
     sendFix(f, t0 + i * 1000);
+    maybeLookup(f.lat, f.lon);
     i++; render();
   };
   tick();
@@ -394,6 +420,8 @@ let wakeLock = null;
 async function requestWakeLock() {
   try { if ("wakeLock" in navigator && document.visibilityState === "visible") wakeLock = await navigator.wakeLock.request("screen"); } catch {}
 }
+window.addEventListener("online", render);
+window.addEventListener("offline", render);
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible" && wantConnected) requestWakeLock();
 });
