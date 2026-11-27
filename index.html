@@ -45,7 +45,9 @@
   .speed span { font-size: .95rem; opacity: .85; }
 
   #bar { display: flex; gap: 8px; flex-wrap: wrap; }
-  #bar button { flex: 1 1 auto; }
+  #bar button, #simbar button { flex: 1 1 auto; }
+  #simbar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  #simbar[hidden] { display: none; }
   #info { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 4px 12px; padding: 10px 0 6px;
     color: var(--muted); font-size: .9rem; }
   #info b { color: var(--fg); font-weight: 600; }
@@ -76,6 +78,10 @@
     <button id="mute" aria-pressed="false">Voice on</button>
     <button id="dim" aria-pressed="false">Dim</button>
     <button id="test">Test voice</button>
+  </div>
+  <div id="simbar">
+    <button id="sim40">Simulate drive · 40 km/h</button>
+    <button id="sim55">Simulate speeding · 55 km/h</button>
   </div>
   <div id="info">
     <div><span class="dot" id="btDot"></span>Device: <b id="btText">not connected</b></div>
@@ -230,8 +236,7 @@ async function onStatus(dv) {
   const prev = cur.state;
   cur = { state: s, limit, dist: dist === 0x7fff ? null : dist, flags };
   $("clockText").textContent = flags & 1 ? (flags & 2 ? "school day" : "no school today") : "not set";
-  if (connected && s !== NO_FIX && !(flags & 4) && lastFixMs) msg("Device isn't using the phone's GPS (accuracy too low?).");
-  else if (Date.now() - lastStatusMs < 2000) msg("");
+  if (!sim && connected && s !== NO_FIX && !(flags & 4) && lastFixMs) msg("Device isn't using the phone's GPS (accuracy too low?).");
   if (prev !== s && prev !== -1) announce(prev, s, limit);
   render();
 }
@@ -255,8 +260,11 @@ function metres(a, b) {
   const k = Math.cos(a.lat * Math.PI / 180) * 111320;
   return Math.hypot((b.lon - a.lon) * k, (b.lat - a.lat) * 111132);
 }
-let prevPos = null;
+let prevPos = null, lastRealMs = 0, lastSentMs = 0, sim = null;
 function onPos(p) {
+  if (Date.now() - p.timestamp > 30000) return;  // Android's cached last position: not current
+  lastRealMs = Date.now();
+  if (sim) return;  // simulated drive in progress
   const c = p.coords;
   const pos = { lat: c.latitude, lon: c.longitude, acc: c.accuracy, t: p.timestamp, speed: c.speed, heading: c.heading };
   // Fill in speed / heading when the phone doesn't report them.
@@ -272,10 +280,12 @@ function onPos(p) {
   sendFix(pos);
   render();
 }
-async function sendFix(pos) {
+async function sendFix(pos, simTime) {
   if (!connected || !fixChar || writing) return;
+  lastSentMs = Date.now();
   const b = new DataView(new ArrayBuffer(20));
-  const ms = Math.floor(pos.t);
+  // Time: the phone's clock (network-synced) for real GPS, the pretend time for a simulation.
+  const ms = Math.floor(simTime ?? Date.now());
   b.setUint8(0, 1);
   b.setInt32(1, Math.round(pos.lat * 1e7), true);
   b.setInt32(5, Math.round(pos.lon * 1e7), true);
@@ -287,6 +297,71 @@ async function sendFix(pos) {
   writing = true;
   try { await fixChar.writeValueWithoutResponse(b.buffer); } catch (e) { /* link dropping; reconnect handles it */ }
   finally { writing = false; }
+}
+
+// Chrome only reports a position when it changes, so a stopped phone goes quiet. Keep the
+// device fed with the last position (current time) while the phone's GPS is still live, and
+// ask for a fresh position now and then. After 30 s with no position the device sees "no fix".
+setInterval(() => {
+  if (sim || !lastPos || !connected) return;
+  const quiet = Date.now() - lastRealMs;
+  if (quiet > 4000 && navigator.geolocation)
+    navigator.geolocation.getCurrentPosition(onPos, () => {}, { enableHighAccuracy: true, maximumAge: 0, timeout: 8000 });
+  if (quiet < 30000 && Date.now() - lastSentMs > 900) sendFix({ ...lastPos, speed: quiet > 3000 ? 0 : lastPos.speed });
+}, 1000);
+
+// ---- simulated drive (no driving needed): a real 40 km/h school zone in Sydney, approached
+// from outside, driven through, then a U-turn and back out. Pretend time: Friday 27 Nov 2026
+// 08:30 (a school day, zone active). The device's clock goes back to real time from the
+// phone's GPS afterwards.
+const SIM_ROAD = [[-33.78588, 151.033141], [-33.785953, 151.032583], [-33.786088, 151.031967], [-33.786213, 151.031547],
+  [-33.786375, 151.031218], [-33.786821, 151.030503], [-33.787024, 151.030131], [-33.787301, 151.029513], [-33.787753, 151.028404]];
+const SIM_T0 = Date.UTC(2026, 10, 26, 21, 30, 0);
+function simFixes(kmh) {
+  const [a, b] = SIM_ROAD;
+  const k = Math.cos(a[0] * Math.PI / 180) * 111320;
+  const dx = (b[1] - a[1]) * k, dy = (b[0] - a[0]) * 111132, L = Math.hypot(dx, dy);
+  const lead = [a[0] - dy / L * 220 / 111132, a[1] - dx / L * 220 / k];
+  const out = [lead, ...SIM_ROAD];
+  const route = [...out, ...out.slice(0, -1).reverse()];
+  const step = kmh / 3.6, fixes = [];
+  for (let j = 0; j + 1 < route.length; j++) {
+    const p = route[j], q = route[j + 1], kk = Math.cos(p[0] * Math.PI / 180) * 111320;
+    const ex = (q[1] - p[1]) * kk, ey = (q[0] - p[0]) * 111132, len = Math.hypot(ex, ey);
+    if (len < 0.5) continue;
+    const ux = ex / len, uy = ey / len, brg = ((Math.atan2(ux, uy) * 180 / Math.PI) + 360) % 360;
+    const n = Math.max(1, Math.floor(len / step));
+    for (let i = 0; i < n; i++) {   // keep left: 3 m left of the centreline
+      const f = i / n, x = ex * f - uy * 3, y = ey * f + ux * 3;
+      fixes.push({ lat: p[0] + y / 111132, lon: p[1] + x / kk, acc: 4, speed: kmh / 3.6, heading: brg });
+    }
+  }
+  return fixes;
+}
+function stopSim(note) {
+  if (!sim) return;
+  clearInterval(sim.timer); sim = null;
+  $("sim40").textContent = "Simulate drive · 40 km/h"; $("sim55").textContent = "Simulate speeding · 55 km/h";
+  phoneKmh = null; msg(note || ""); render();
+}
+function startSim(kmh, btn) {
+  if (sim) { stopSim("Simulation stopped."); return; }
+  if (!connected) { msg("Connect to the device first."); return; }
+  say(" ");
+  const fixes = simFixes(kmh);
+  let i = 0;
+  sim = { timer: 0 };
+  btn.textContent = "Stop simulation";
+  msg(`Simulating: approach, drive through, turn around (${fixes.length} s). Pretend time Fri 08:30.`);
+  const tick = () => {
+    if (i >= fixes.length) { stopSim("Simulation finished. Back to the phone's GPS."); return; }
+    const f = fixes[i];
+    phoneKmh = kmh;
+    sendFix(f, SIM_T0 + i * 1000);
+    i++; render();
+  };
+  tick();
+  sim.timer = setInterval(tick, 1000);
 }
 
 // ---- screen on
@@ -306,6 +381,8 @@ function applyPrefs() {
   document.documentElement.style.setProperty("--dim", dimmed ? "0.45" : "1");
 }
 $("connect").addEventListener("click", connectFlow);
+$("sim40").addEventListener("click", (e) => startSim(40, e.currentTarget));
+$("sim55").addEventListener("click", (e) => startSim(55, e.currentTarget));
 $("mute").addEventListener("click", () => { muted = !muted; store.set("sz_muted", muted); if (muted) speechSynthesis.cancel(); applyPrefs(); });
 $("dim").addEventListener("click", () => { dimmed = !dimmed; store.set("sz_dim", dimmed); applyPrefs(); });
 $("test").addEventListener("click", () => {
